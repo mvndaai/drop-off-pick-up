@@ -11,6 +11,8 @@ type NodeType string
 const (
 	// NodeStreet is the entry point from the public road.
 	NodeStreet NodeType = "Street"
+	// NodeQueue is the queueing area before service zones.
+	NodeQueue NodeType = "Queue"
 	// NodeIdentifier is a license-plate / ID check station.
 	NodeIdentifier NodeType = "Identifier"
 	// NodeSplit divides traffic into two or more lanes.
@@ -24,6 +26,10 @@ const (
 	NodeDropZone NodeType = "DropZone"
 	// NodeWaitZone is where a vehicle parks while passengers are notified.
 	NodeWaitZone NodeType = "WaitZone"
+	// NodeServiceZone is a shared pickup/dropoff location.
+	NodeServiceZone NodeType = "ServiceZone"
+	// NodeBuilding is the final pedestrian destination.
+	NodeBuilding NodeType = "Building"
 	// NodeExit is where a vehicle leaves the facility.
 	NodeExit NodeType = "Exit"
 )
@@ -34,6 +40,8 @@ type RouteNode struct {
 	Type       NodeType
 	Label      string
 	Pos        Point
+	// RequiresIDCheck makes ID check attachable to any node.
+	RequiresIDCheck bool
 	Exits      []*RouteNode
 	CrossLinks []*RouteNode
 }

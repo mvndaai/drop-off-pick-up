@@ -56,6 +56,15 @@ type ZoneSuggestion struct {
 	Reason         string  `json:"reason"`
 }
 
+// SplitStrategy controls how split nodes route vehicles to exits.
+type SplitStrategy string
+
+const (
+	SplitRoundRobin           SplitStrategy = "round_robin"
+	SplitFillOneSide          SplitStrategy = "fill_one_side"
+	SplitPreferAfterCrosswalk SplitStrategy = "prefer_after_crosswalk"
+)
+
 type vehicleProgress struct {
 	vehicle       *model.Vehicle
 	currentNode   *model.RouteNode
@@ -68,6 +77,7 @@ type vehicleProgress struct {
 	assignedZone  string
 	spawnedAt     float32
 	estimatedCost float32
+	idChecked     bool
 }
 
 type scheduledVehicle struct {
@@ -103,6 +113,7 @@ type QueueEntry struct {
 	PreferredZone     string
 	PreferredOverride string
 	ArrivalMinute     int
+	VehicleID         string
 }
 
 // SerializableNode stores a route node with edge IDs for save/load.
@@ -110,6 +121,7 @@ type SerializableNode struct {
 	ID         string         `json:"id"`
 	Type       model.NodeType `json:"type"`
 	Label      string         `json:"label"`
+	RequiresIDCheck bool      `json:"requiresIdCheck,omitempty"`
 	X          float32        `json:"x"`
 	Y          float32        `json:"y"`
 	Exits      []string       `json:"exits,omitempty"`
@@ -122,9 +134,11 @@ type ScenarioFile struct {
 	Speed           float32            `json:"speed"`
 	DefaultZone     string             `json:"defaultZone"`
 	Devices         []DeviceControl    `json:"devices"`
+	SplitStrategies map[string]SplitStrategy `json:"splitStrategies,omitempty"`
 	Nodes           []SerializableNode `json:"nodes"`
 	QueuedVehicles  []model.Vehicle    `json:"queuedVehicles"`
 	PendingVehicles []model.Vehicle    `json:"pendingVehicles"`
+	People          []model.Person     `json:"people,omitempty"`
 }
 
 // Simulation manages vehicles through the route.
@@ -148,6 +162,10 @@ type Simulation struct {
 	queue   []*model.Vehicle
 	pending []*scheduledVehicle
 	devices map[string]DeviceControl
+	splitStrategies map[string]SplitStrategy
+	peopleByID map[string]*model.Person
+	unassignedPeople []string
+	nextPersonID int
 }
 
 // NewSimulation creates a Simulation for the given mode.
@@ -157,12 +175,17 @@ func NewSimulation(mode model.Mode) *Simulation {
 		Mode:          mode,
 		Route:         route,
 		Speed:         1,
-		DefaultZoneID: "zone-a",
+		DefaultZoneID: "service-pre-a",
 		devices:       map[string]DeviceControl{},
+		splitStrategies: map[string]SplitStrategy{},
+		peopleByID:    map[string]*model.Person{},
 	}
 	for _, n := range route.Nodes {
 		if n.Type == model.NodeCrosswalk || n.Type == model.NodeSplit {
 			s.devices[n.ID] = DeviceControl{NodeID: n.ID, Auto: true, Go: true}
+		}
+		if n.Type == model.NodeSplit {
+			s.splitStrategies[n.ID] = SplitRoundRobin
 		}
 	}
 	return s
@@ -252,6 +275,41 @@ func (s *Simulation) GetDeviceControls() []DeviceControl {
 	return out
 }
 
+func (s *Simulation) SetSplitStrategy(nodeID string, strategy SplitStrategy) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strategy == "" {
+		strategy = SplitRoundRobin
+	}
+	s.splitStrategies[nodeID] = strategy
+}
+
+func (s *Simulation) GetSplitStrategy(nodeID string) SplitStrategy {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strategy, ok := s.splitStrategies[nodeID]; ok {
+		return strategy
+	}
+	return SplitRoundRobin
+}
+
+func (s *Simulation) SetNodeIDCheck(nodeID string, enabled bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.Route.FindNode(nodeID)
+	if n == nil {
+		return false
+	}
+	n.RequiresIDCheck = enabled
+	return true
+}
+
+func (s *Simulation) SetMode(mode model.Mode) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Mode = mode
+}
+
 // GenerateVehicle creates a random vehicle using default setup values.
 func (s *Simulation) GenerateVehicle() *model.Vehicle {
 	s.mu.Lock()
@@ -303,6 +361,104 @@ func (s *Simulation) GenerateVehicle() *model.Vehicle {
 	}
 }
 
+type PersonEntry struct {
+	ID         string
+	Name       string
+	AssignedTo string
+}
+
+// AddPerson adds a person to the unassigned pool.
+func (s *Simulation) AddPerson(p *model.Person) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextPersonID++
+	if p.ID == "" {
+		p.ID = fmt.Sprintf("UP%d", s.nextPersonID)
+	}
+	if p.Name == "" {
+		p.Name = p.ID
+	}
+	cp := *p
+	s.peopleByID[cp.ID] = &cp
+	s.unassignedPeople = append(s.unassignedPeople, cp.ID)
+	return cp.ID
+}
+
+// ListPeople returns unassigned and assigned people currently known.
+func (s *Simulation) ListPeople() []PersonEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]PersonEntry, 0, len(s.peopleByID))
+	for _, id := range s.unassignedPeople {
+		if p := s.peopleByID[id]; p != nil {
+			out = append(out, PersonEntry{ID: p.ID, Name: p.Name})
+		}
+	}
+	for _, v := range s.queue {
+		for _, p := range v.Passengers {
+			out = append(out, PersonEntry{ID: p.ID, Name: p.Name, AssignedTo: v.ID})
+		}
+	}
+	for _, p := range s.pending {
+		for _, person := range p.vehicle.Passengers {
+			out = append(out, PersonEntry{ID: person.ID, Name: person.Name, AssignedTo: p.vehicle.ID})
+		}
+	}
+	return out
+}
+
+// PendingVehicleIDs returns IDs for assignable vehicles.
+func (s *Simulation) PendingVehicleIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.queue)+len(s.pending))
+	for _, v := range s.queue {
+		out = append(out, v.ID)
+	}
+	for _, p := range s.pending {
+		out = append(out, p.vehicle.ID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// AssignPersonToVehicle moves a pooled person into a queued/pending vehicle.
+func (s *Simulation) AssignPersonToVehicle(personID, vehicleID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	person := s.peopleByID[personID]
+	if person == nil {
+		return false
+	}
+	for _, v := range s.queue {
+		if v.ID == vehicleID {
+			cp := *person
+			v.Passengers = append(v.Passengers, &cp)
+			s.removeUnassigned(personID)
+			return true
+		}
+	}
+	for _, p := range s.pending {
+		if p.vehicle.ID == vehicleID {
+			cp := *person
+			p.vehicle.Passengers = append(p.vehicle.Passengers, &cp)
+			s.removeUnassigned(personID)
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Simulation) removeUnassigned(personID string) {
+	n := s.unassignedPeople[:0]
+	for _, id := range s.unassignedPeople {
+		if id != personID {
+			n = append(n, id)
+		}
+	}
+	s.unassignedPeople = n
+}
+
 // Enqueue adds a vehicle with its scheduled arrival settings.
 func (s *Simulation) Enqueue(v *model.Vehicle) {
 	s.mu.Lock()
@@ -346,6 +502,7 @@ func (s *Simulation) GetQueueSnapshot() []QueueEntry {
 
 func queueEntryFromVehicle(v *model.Vehicle) QueueEntry {
 	return QueueEntry{
+		VehicleID:         v.ID,
 		LicensePlate:      v.LicensePlate,
 		NumPassengers:     len(v.Passengers),
 		DropStyle:         v.DropStyle.String(),
@@ -375,7 +532,7 @@ func (s *Simulation) GetVehicleSnapshots() []VehicleSnapshot {
 	return snaps
 }
 
-// GetPedestrianSnapshots renders people walking from wait/drop zones toward crosswalk.
+// GetPedestrianSnapshots renders people walking through service/crosswalk/building paths.
 func (s *Simulation) GetPedestrianSnapshots() []PedestrianSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -384,13 +541,15 @@ func (s *Simulation) GetPedestrianSnapshots() []PedestrianSnapshot {
 		if vp.state != StateWaiting || vp.waitTotal <= 0 {
 			continue
 		}
-		if vp.currentNode.Type != model.NodeDropZone && vp.currentNode.Type != model.NodeWaitZone {
+		if vp.currentNode.Type != model.NodeDropZone &&
+			vp.currentNode.Type != model.NodeWaitZone &&
+			vp.currentNode.Type != model.NodeServiceZone {
 			continue
 		}
-		if len(vp.currentNode.Exits) == 0 {
+		target := s.firstPedTarget(vp.currentNode)
+		if target == nil {
 			continue
 		}
-		target := vp.currentNode.Exits[0]
 		progress := 1 - (vp.waitTimer / vp.waitTotal)
 		if progress < 0 {
 			progress = 0
@@ -415,6 +574,16 @@ func (s *Simulation) GetPedestrianSnapshots() []PedestrianSnapshot {
 		}
 	}
 	return out
+}
+
+func (s *Simulation) firstPedTarget(n *model.RouteNode) *model.RouteNode {
+	if len(n.CrossLinks) > 0 {
+		return n.CrossLinks[0]
+	}
+	if len(n.Exits) > 0 {
+		return n.Exits[0]
+	}
+	return nil
 }
 
 func (s *Simulation) tick(dt float32) {
@@ -477,6 +646,14 @@ func (s *Simulation) updateVehicle(vp *vehicleProgress, dt float32) {
 	switch vp.state {
 	case StateMoving:
 		if vp.nextNode == nil {
+			if vp.currentNode.RequiresIDCheck && !vp.idChecked {
+				vp.state = StateChecking
+				vp.waitTimer = 1.5
+				vp.waitTotal = 1.5
+				vp.statusMsg = "Checking ID"
+				vp.idChecked = true
+				return
+			}
 			exits := vp.currentNode.Exits
 			switch len(exits) {
 			case 0:
@@ -496,8 +673,7 @@ func (s *Simulation) updateVehicle(vp *vehicleProgress, dt float32) {
 					if preferred := s.findExitByID(exits, vp.assignedZone); preferred != nil {
 						vp.nextNode = preferred
 					} else {
-						vp.nextNode = exits[s.splitCounter%len(exits)]
-						s.splitCounter++
+						vp.nextNode = s.chooseSplitExit(vp.currentNode, exits)
 					}
 				} else {
 					vp.nextNode = exits[s.splitCounter%len(exits)]
@@ -514,6 +690,7 @@ func (s *Simulation) updateVehicle(vp *vehicleProgress, dt float32) {
 			vp.progress = 0
 			vp.currentNode = vp.nextNode
 			vp.nextNode = nil
+			vp.idChecked = false
 			s.arriveAt(vp)
 		}
 	case StateChecking, StateWaiting:
@@ -545,41 +722,115 @@ func (s *Simulation) findExitByID(exits []*model.RouteNode, id string) *model.Ro
 	return nil
 }
 
+func (s *Simulation) chooseSplitExit(split *model.RouteNode, exits []*model.RouteNode) *model.RouteNode {
+	strategy := s.splitStrategies[split.ID]
+	switch strategy {
+	case SplitFillOneSide:
+		for _, ex := range exits {
+			if !s.nodeOccupied(ex) {
+				return ex
+			}
+		}
+		return exits[0]
+	case SplitPreferAfterCrosswalk:
+		for _, ex := range exits {
+			if s.reachesServiceAfterCrosswalk(ex, map[string]bool{}) && !s.nodeOccupied(ex) {
+				return ex
+			}
+		}
+		for _, ex := range exits {
+			if !s.nodeOccupied(ex) {
+				return ex
+			}
+		}
+		return exits[s.splitCounter%len(exits)]
+	default:
+		chosen := exits[s.splitCounter%len(exits)]
+		s.splitCounter++
+		return chosen
+	}
+}
+
+func (s *Simulation) nodeOccupied(node *model.RouteNode) bool {
+	for _, vp := range s.active {
+		if vp.state == StateDone {
+			continue
+		}
+		if vp.currentNode == node || vp.nextNode == node {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Simulation) reachesServiceAfterCrosswalk(start *model.RouteNode, visited map[string]bool) bool {
+	if start == nil {
+		return false
+	}
+	if visited[start.ID] {
+		return false
+	}
+	visited[start.ID] = true
+	seenCrosswalk := start.Type == model.NodeCrosswalk
+	return s.reachesServiceAfterCrosswalkWithState(start, visited, seenCrosswalk)
+}
+
+func (s *Simulation) reachesServiceAfterCrosswalkWithState(start *model.RouteNode, visited map[string]bool, seenCrosswalk bool) bool {
+	for _, n := range start.Exits {
+		if visited[n.ID] {
+			continue
+		}
+		nextSeenCrosswalk := seenCrosswalk || n.Type == model.NodeCrosswalk
+		if nextSeenCrosswalk && (n.Type == model.NodeServiceZone || n.Type == model.NodeDropZone || n.Type == model.NodeWaitZone) {
+			return true
+		}
+		visited[n.ID] = true
+		if s.reachesServiceAfterCrosswalkWithState(n, visited, nextSeenCrosswalk) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Simulation) arriveAt(vp *vehicleProgress) {
 	node := vp.currentNode
 	switch node.Type {
 	case model.NodeIdentifier:
-		vp.state = StateChecking
-		vp.waitTimer = 1.5
-		vp.waitTotal = 1.5
-		vp.statusMsg = "Checking ID"
+		vp.statusMsg = "Identifier"
+	case model.NodeQueue:
+		vp.state = StateWaiting
+		vp.waitTimer = 0.8
+		vp.waitTotal = 0.8
+		vp.statusMsg = "Queueing"
 	case model.NodeDropZone:
+		fallthrough
+	case model.NodeWaitZone:
+		fallthrough
+	case model.NodeServiceZone:
 		vp.state = StateWaiting
 		total := float32(0)
-		for _, p := range vp.vehicle.Passengers {
-			total += p.EffectiveDropOffSeconds()
-		}
-		if total <= 0 {
-			total = vp.vehicle.DropStyle.Duration()
-		}
-		vp.waitTimer = total
-		vp.waitTotal = total
-		vp.estimatedCost = total
-		vp.statusMsg = fmt.Sprintf("Drop-off (%s)", vp.vehicle.DropStyle)
-	case model.NodeWaitZone:
-		vp.state = StateWaiting
-		total := float32(3)
-		for _, p := range vp.vehicle.Passengers {
-			walk := p.WalkSeconds
-			if walk <= 0 {
-				walk = 3
+		if s.Mode == model.ModePickUp {
+			total = 3
+			for _, p := range vp.vehicle.Passengers {
+				walk := p.WalkSeconds
+				if walk <= 0 {
+					walk = 3
+				}
+				total += walk
 			}
-			total += walk
+			vp.statusMsg = "Picking up passengers…"
+		} else {
+			for _, p := range vp.vehicle.Passengers {
+				total += p.EffectiveDropOffSeconds()
+			}
+			if total <= 0 {
+				total = vp.vehicle.DropStyle.Duration()
+			}
+			vp.statusMsg = fmt.Sprintf("Drop-off (%s)", vp.vehicle.DropStyle)
 		}
 		vp.waitTimer = total
 		vp.waitTotal = total
 		vp.estimatedCost = total
-		vp.statusMsg = "Notifying passengers…"
 	case model.NodeCrosswalk:
 		vp.state = StateWaiting
 		if !s.canProceed(node) {
@@ -592,6 +843,8 @@ func (s *Simulation) arriveAt(vp *vehicleProgress) {
 			vp.statusMsg = "Crosswalk"
 		}
 	case model.NodeExit:
+		vp.statusMsg = "Exit"
+	case model.NodeBuilding:
 		vp.state = StateDone
 	default:
 		vp.statusMsg = string(node.Type)
@@ -644,6 +897,9 @@ func (s *Simulation) AddNode(nodeType model.NodeType, label string, pos model.Po
 	if nodeType == model.NodeSplit || nodeType == model.NodeCrosswalk {
 		s.devices[id] = DeviceControl{NodeID: id, Auto: true, Go: true}
 	}
+	if nodeType == model.NodeSplit {
+		s.splitStrategies[id] = SplitRoundRobin
+	}
 	return id
 }
 
@@ -679,7 +935,7 @@ func (s *Simulation) RouteNodes() []model.RouteNode {
 	defer s.mu.Unlock()
 	out := make([]model.RouteNode, len(s.Route.Nodes))
 	for i, n := range s.Route.Nodes {
-		out[i] = model.RouteNode{ID: n.ID, Type: n.Type, Label: n.Label, Pos: n.Pos}
+		out[i] = model.RouteNode{ID: n.ID, Type: n.Type, Label: n.Label, Pos: n.Pos, RequiresIDCheck: n.RequiresIDCheck}
 	}
 	return out
 }
@@ -691,11 +947,12 @@ func (s *Simulation) RouteSnapshot() []SerializableNode {
 	out := make([]SerializableNode, 0, len(s.Route.Nodes))
 	for _, n := range s.Route.Nodes {
 		sn := SerializableNode{
-			ID:    n.ID,
-			Type:  n.Type,
-			Label: n.Label,
-			X:     n.Pos.X,
-			Y:     n.Pos.Y,
+			ID:              n.ID,
+			Type:            n.Type,
+			Label:           n.Label,
+			RequiresIDCheck: n.RequiresIDCheck,
+			X:               n.Pos.X,
+			Y:               n.Pos.Y,
 		}
 		for _, e := range n.Exits {
 			sn.Exits = append(sn.Exits, e.ID)
@@ -708,7 +965,7 @@ func (s *Simulation) RouteSnapshot() []SerializableNode {
 	return out
 }
 
-// SuggestZoneOverrides suggests moving high-delay vehicles to zone-b.
+// SuggestZoneOverrides suggests moving high-delay vehicles to alternative service lanes.
 func (s *Simulation) SuggestZoneOverrides() []ZoneSuggestion {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -719,7 +976,7 @@ func (s *Simulation) SuggestZoneOverrides() []ZoneSuggestion {
 			suggestions = append(suggestions, ZoneSuggestion{
 				VehicleID:      v.ID,
 				LicensePlate:   v.LicensePlate,
-				SuggestedZone:  "zone-b",
+				SuggestedZone:  "service-post-a",
 				EstimatedDelay: est,
 				Reason:         "Long service time; move to secondary zone to keep primary lane flowing",
 			})
@@ -732,7 +989,7 @@ func (s *Simulation) SuggestZoneOverrides() []ZoneSuggestion {
 			suggestions = append(suggestions, ZoneSuggestion{
 				VehicleID:      v.ID,
 				LicensePlate:   v.LicensePlate,
-				SuggestedZone:  "zone-b",
+				SuggestedZone:  "service-post-a",
 				EstimatedDelay: est,
 				Reason:         "Long service time; pre-assign to secondary zone",
 			})
@@ -788,7 +1045,7 @@ func (s *Simulation) SaveScenario(w io.Writer) error {
 	defer s.mu.Unlock()
 	nodes := make([]SerializableNode, 0, len(s.Route.Nodes))
 	for _, n := range s.Route.Nodes {
-		sn := SerializableNode{ID: n.ID, Type: n.Type, Label: n.Label, X: n.Pos.X, Y: n.Pos.Y}
+		sn := SerializableNode{ID: n.ID, Type: n.Type, Label: n.Label, RequiresIDCheck: n.RequiresIDCheck, X: n.Pos.X, Y: n.Pos.Y}
 		for _, e := range n.Exits {
 			sn.Exits = append(sn.Exits, e.ID)
 		}
@@ -809,14 +1066,20 @@ func (s *Simulation) SaveScenario(w io.Writer) error {
 	for _, d := range s.devices {
 		devices = append(devices, d)
 	}
+	people := make([]model.Person, 0, len(s.peopleByID))
+	for _, p := range s.peopleByID {
+		people = append(people, *p)
+	}
 	payload := ScenarioFile{
 		Mode:            s.Mode,
 		Speed:           s.Speed,
 		DefaultZone:     s.DefaultZoneID,
 		Devices:         devices,
+		SplitStrategies: s.splitStrategies,
 		Nodes:           nodes,
 		QueuedVehicles:  queued,
 		PendingVehicles: pending,
+		People:          people,
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -833,7 +1096,7 @@ func (s *Simulation) LoadScenario(r io.Reader) error {
 	nodeMap := map[string]*model.RouteNode{}
 	routeNodes := make([]*model.RouteNode, 0, len(payload.Nodes))
 	for _, sn := range payload.Nodes {
-		n := &model.RouteNode{ID: sn.ID, Type: sn.Type, Label: sn.Label, Pos: model.Point{X: sn.X, Y: sn.Y}}
+		n := &model.RouteNode{ID: sn.ID, Type: sn.Type, Label: sn.Label, RequiresIDCheck: sn.RequiresIDCheck, Pos: model.Point{X: sn.X, Y: sn.Y}}
 		nodeMap[n.ID] = n
 		routeNodes = append(routeNodes, n)
 	}
@@ -850,7 +1113,7 @@ func (s *Simulation) LoadScenario(r io.Reader) error {
 			}
 		}
 	}
-	entry := nodeMap["street"]
+	entry := nodeMap["street-in"]
 	if entry == nil && len(routeNodes) > 0 {
 		entry = routeNodes[0]
 	}
@@ -865,8 +1128,19 @@ func (s *Simulation) LoadScenario(r io.Reader) error {
 	s.DefaultZoneID = payload.DefaultZone
 	s.Route = &model.Route{Entry: entry, Nodes: routeNodes}
 	s.devices = map[string]DeviceControl{}
+	s.splitStrategies = map[string]SplitStrategy{}
+	for nodeID, strategy := range payload.SplitStrategies {
+		s.splitStrategies[nodeID] = strategy
+	}
 	for _, d := range payload.Devices {
 		s.devices[d.NodeID] = d
+	}
+	s.peopleByID = map[string]*model.Person{}
+	s.unassignedPeople = nil
+	for i := range payload.People {
+		p := payload.People[i]
+		s.peopleByID[p.ID] = &p
+		s.unassignedPeople = append(s.unassignedPeople, p.ID)
 	}
 	s.active = nil
 	s.queue = nil
@@ -884,35 +1158,63 @@ func (s *Simulation) LoadScenario(r io.Reader) error {
 
 // BuildRoute constructs the default node graph.
 func BuildRoute(mode model.Mode) *model.Route {
-	street := &model.RouteNode{ID: "street", Type: model.NodeStreet, Label: "Street", Pos: model.Point{X: 350, Y: 30}}
-	identifier := &model.RouteNode{ID: "identifier", Type: model.NodeIdentifier, Label: "ID Check", Pos: model.Point{X: 350, Y: 120}}
-	split := &model.RouteNode{ID: "split", Type: model.NodeSplit, Label: "Split", Pos: model.Point{X: 350, Y: 210}}
+	streetIn := &model.RouteNode{ID: "street-in", Type: model.NodeStreet, Label: "Street In", Pos: model.Point{X: 380, Y: 30}}
+	split1 := &model.RouteNode{ID: "split-1", Type: model.NodeSplit, Label: "Split 1", Pos: model.Point{X: 380, Y: 100}}
+	split2 := &model.RouteNode{ID: "split-2", Type: model.NodeSplit, Label: "Split 2", Pos: model.Point{X: 380, Y: 170}}
+	queue := &model.RouteNode{ID: "queue", Type: model.NodeQueue, Label: "Queue", Pos: model.Point{X: 380, Y: 240}}
+	preA := &model.RouteNode{ID: "service-pre-a", Type: model.NodeServiceZone, Label: "Service A", Pos: model.Point{X: 250, Y: 320}}
+	preB := &model.RouteNode{ID: "service-pre-b", Type: model.NodeServiceZone, Label: "Service B", Pos: model.Point{X: 380, Y: 320}}
+	preC := &model.RouteNode{ID: "service-pre-c", Type: model.NodeServiceZone, Label: "Service C", Pos: model.Point{X: 510, Y: 320}}
+	preD := &model.RouteNode{ID: "service-pre-d", Type: model.NodeServiceZone, Label: "Service D", Pos: model.Point{X: 640, Y: 320}}
+	crosswalk := &model.RouteNode{ID: "crosswalk", Type: model.NodeCrosswalk, Label: "Crosswalk", Pos: model.Point{X: 445, Y: 395}}
+	postA := &model.RouteNode{ID: "service-post-a", Type: model.NodeServiceZone, Label: "Service E", Pos: model.Point{X: 250, Y: 470}}
+	postB := &model.RouteNode{ID: "service-post-b", Type: model.NodeServiceZone, Label: "Service F", Pos: model.Point{X: 380, Y: 470}}
+	postC := &model.RouteNode{ID: "service-post-c", Type: model.NodeServiceZone, Label: "Service G", Pos: model.Point{X: 510, Y: 470}}
+	postD := &model.RouteNode{ID: "service-post-d", Type: model.NodeServiceZone, Label: "Service H", Pos: model.Point{X: 640, Y: 470}}
+	joiner1 := &model.RouteNode{ID: "joiner-1", Type: model.NodeJoiner, Label: "Joiner 1", Pos: model.Point{X: 445, Y: 540}}
+	joiner2 := &model.RouteNode{ID: "joiner-2", Type: model.NodeJoiner, Label: "Joiner 2", Pos: model.Point{X: 445, Y: 600}}
+	streetOut := &model.RouteNode{ID: "street-out", Type: model.NodeStreet, Label: "Street Out", Pos: model.Point{X: 445, Y: 650}}
+	building := &model.RouteNode{ID: "building", Type: model.NodeBuilding, Label: "Building", Pos: model.Point{X: 120, Y: 470}}
 
-	typeA := model.NodeWaitZone
-	typeB := model.NodeWaitZone
-	labelA := "Wait Zone A"
-	labelB := "Wait Zone B"
-	if mode == model.ModeDropOff {
-		typeA = model.NodeDropZone
-		typeB = model.NodeDropZone
-		labelA = "Drop Zone A"
-		labelB = "Drop Zone B"
+	// Car path: street > split > queue > service > joiner > joiner > street
+	streetIn.Exits = []*model.RouteNode{split1}
+	split1.Exits = []*model.RouteNode{split2, queue}
+	split2.Exits = []*model.RouteNode{queue, preA, preB, preC, preD}
+	queue.Exits = []*model.RouteNode{preA, preB, preC, preD}
+	preA.Exits = []*model.RouteNode{crosswalk}
+	preB.Exits = []*model.RouteNode{crosswalk}
+	preC.Exits = []*model.RouteNode{crosswalk}
+	preD.Exits = []*model.RouteNode{crosswalk}
+	crosswalk.Exits = []*model.RouteNode{postA, postB, postC, postD}
+	postA.Exits = []*model.RouteNode{joiner1}
+	postB.Exits = []*model.RouteNode{joiner1}
+	postC.Exits = []*model.RouteNode{joiner1}
+	postD.Exits = []*model.RouteNode{joiner1}
+	joiner1.Exits = []*model.RouteNode{joiner2}
+	joiner2.Exits = []*model.RouteNode{streetOut}
+
+	// Person path: entrance/exit -> service -> crosswalk -> service -> building
+	streetIn.CrossLinks = []*model.RouteNode{preA, preB, preC, preD}
+	preA.CrossLinks = []*model.RouteNode{crosswalk}
+	preB.CrossLinks = []*model.RouteNode{crosswalk}
+	preC.CrossLinks = []*model.RouteNode{crosswalk}
+	preD.CrossLinks = []*model.RouteNode{crosswalk}
+	crosswalk.CrossLinks = []*model.RouteNode{postA, postB, postC, postD}
+	postA.CrossLinks = []*model.RouteNode{building}
+	postB.CrossLinks = []*model.RouteNode{building}
+	postC.CrossLinks = []*model.RouteNode{building}
+	postD.CrossLinks = []*model.RouteNode{building}
+
+	if mode == model.ModePickUp {
+		split1.Label = "Split 1 (Pick-Up)"
+		split2.Label = "Split 2 (Pick-Up)"
 	}
 
-	zoneA := &model.RouteNode{ID: "zone-a", Type: typeA, Label: labelA, Pos: model.Point{X: 175, Y: 330}}
-	zoneB := &model.RouteNode{ID: "zone-b", Type: typeB, Label: labelB, Pos: model.Point{X: 525, Y: 330}}
-	crosswalk := &model.RouteNode{ID: "crosswalk", Type: model.NodeCrosswalk, Label: "Crosswalk", Pos: model.Point{X: 350, Y: 440}}
-	joiner := &model.RouteNode{ID: "joiner", Type: model.NodeJoiner, Label: "Joiner", Pos: model.Point{X: 350, Y: 530}}
-	exit := &model.RouteNode{ID: "exit", Type: model.NodeExit, Label: "Exit", Pos: model.Point{X: 350, Y: 590}}
-
-	street.Exits = []*model.RouteNode{identifier}
-	identifier.Exits = []*model.RouteNode{split}
-	split.Exits = []*model.RouteNode{zoneA, zoneB}
-	zoneA.Exits = []*model.RouteNode{crosswalk}
-	zoneB.Exits = []*model.RouteNode{crosswalk}
-	crosswalk.Exits = []*model.RouteNode{joiner}
-	crosswalk.CrossLinks = []*model.RouteNode{zoneA, zoneB}
-	joiner.Exits = []*model.RouteNode{exit}
-
-	return &model.Route{Entry: street, Nodes: []*model.RouteNode{street, identifier, split, zoneA, zoneB, crosswalk, joiner, exit}}
+	return &model.Route{
+		Entry: streetIn,
+		Nodes: []*model.RouteNode{
+			streetIn, split1, split2, queue, preA, preB, preC, preD,
+			crosswalk, postA, postB, postC, postD, joiner1, joiner2, streetOut, building,
+		},
+	}
 }

@@ -63,6 +63,9 @@ func buildModeTab(w fyne.Window, sim *simulation.Simulation, title string) fyne.
 	setupVehicleBtn := widget.NewButton("⚙ Vehicle Setup", func() {
 		showVehicleSetupDialog(w, sim, refreshAll)
 	})
+	peopleBtn := widget.NewButton("👤 People", func() {
+		showPeopleDialog(w, sim, refreshAll)
+	})
 
 	startBtn := widget.NewButton("▶ Start", nil)
 	stopBtn := widget.NewButton("⏹ Stop", nil)
@@ -159,12 +162,27 @@ func buildModeTab(w fyne.Window, sim *simulation.Simulation, title string) fyne.
 	deviceBtn := widget.NewButton("Control Devices", func() {
 		showDeviceDialog(w, sim, refreshAll)
 	})
+	idCheckBtn := widget.NewButton("Attach ID Check", func() {
+		showAttachIDCheckDialog(w, sim, refreshAll)
+	})
+	splitStrategyBtn := widget.NewButton("Split Strategy", func() {
+		showSplitStrategyDialog(w, sim, refreshAll)
+	})
+	modeSel := widget.NewSelect([]string{model.ModeDropOff.String(), model.ModePickUp.String()}, func(sel string) {
+		if sel == model.ModePickUp.String() {
+			sim.SetMode(model.ModePickUp)
+		} else {
+			sim.SetMode(model.ModeDropOff)
+		}
+		refreshAll()
+	})
+	modeSel.SetSelected(sim.Mode.String())
 
 	desc := widget.NewLabel(fmt.Sprintf("%s scenario: drag nodes to edit layout; add/connect items; save/load and run timed simulations.", sim.Mode.String()))
 	desc.Wrapping = fyne.TextWrapWord
 
-	row1 := container.NewHBox(addVehicleBtn, setupVehicleBtn, startBtn, stopBtn, widget.NewLabel("Speed"), speedSel)
-	row2 := container.NewHBox(addNodeBtn, connectBtn, deviceBtn, suggestBtn, applySuggestBtn, saveBtn, loadBtn)
+	row1 := container.NewHBox(addVehicleBtn, setupVehicleBtn, peopleBtn, startBtn, stopBtn, widget.NewLabel("Mode"), modeSel, widget.NewLabel("Speed"), speedSel)
+	row2 := container.NewHBox(addNodeBtn, connectBtn, deviceBtn, idCheckBtn, splitStrategyBtn, suggestBtn, applySuggestBtn, saveBtn, loadBtn)
 	controls := container.NewVBox(desc, row1, row2)
 
 	return container.NewBorder(controls, nil, nil, statusPanel, routeView)
@@ -189,7 +207,7 @@ func showVehicleSetupDialog(w fyne.Window, sim *simulation.Simulation, refresh f
 	lateExtra.SetText("1")
 
 	zone := widget.NewEntry()
-	zone.SetText("zone-a")
+	zone.SetText("service-pre-a")
 	override := widget.NewEntry()
 	override.SetPlaceHolder("optional")
 
@@ -258,7 +276,11 @@ func showVehicleSetupDialog(w fyne.Window, sim *simulation.Simulation, refresh f
 }
 
 func showAddNodeDialog(w fyne.Window, sim *simulation.Simulation, refresh func()) {
-	typeSel := widget.NewSelect([]string{string(model.NodeStreet), string(model.NodeIdentifier), string(model.NodeSplit), string(model.NodeJoiner), string(model.NodeCrosswalk), string(model.NodeDropZone), string(model.NodeWaitZone), string(model.NodeExit)}, nil)
+	typeSel := widget.NewSelect([]string{
+		string(model.NodeStreet), string(model.NodeQueue), string(model.NodeIdentifier), string(model.NodeSplit),
+		string(model.NodeJoiner), string(model.NodeCrosswalk), string(model.NodeDropZone), string(model.NodeWaitZone),
+		string(model.NodeServiceZone), string(model.NodeBuilding), string(model.NodeExit),
+	}, nil)
 	typeSel.SetSelected(string(model.NodeCrosswalk))
 	label := widget.NewEntry()
 	label.SetText("New Item")
@@ -279,6 +301,106 @@ func showAddNodeDialog(w fyne.Window, sim *simulation.Simulation, refresh func()
 		xv, _ := strconv.ParseFloat(x.Text, 32)
 		yv, _ := strconv.ParseFloat(y.Text, 32)
 		sim.AddNode(model.NodeType(typeSel.Selected), label.Text, model.Point{X: float32(xv), Y: float32(yv)})
+		refresh()
+	}, w)
+	d.Show()
+}
+
+func showAttachIDCheckDialog(w fyne.Window, sim *simulation.Simulation, refresh func()) {
+	nodes := sim.RouteNodes()
+	if len(nodes) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n.ID)
+	}
+	nodeSel := widget.NewSelect(ids, nil)
+	nodeSel.SetSelected(ids[0])
+	enable := widget.NewCheck("Require ID check at this node", nil)
+	d := dialog.NewForm("Attach ID Check", "Apply", "Cancel", []*widget.FormItem{
+		widget.NewFormItem("Node", nodeSel),
+		widget.NewFormItem("ID Check", enable),
+	}, func(ok bool) {
+		if !ok {
+			return
+		}
+		sim.SetNodeIDCheck(nodeSel.Selected, enable.Checked)
+		refresh()
+	}, w)
+	d.Show()
+}
+
+func showSplitStrategyDialog(w fyne.Window, sim *simulation.Simulation, refresh func()) {
+	nodes := sim.RouteNodes()
+	splitIDs := make([]string, 0)
+	for _, n := range nodes {
+		if n.Type == model.NodeSplit {
+			splitIDs = append(splitIDs, n.ID)
+		}
+	}
+	if len(splitIDs) == 0 {
+		dialog.ShowInformation("Split Strategy", "No split nodes available.", w)
+		return
+	}
+	nodeSel := widget.NewSelect(splitIDs, nil)
+	nodeSel.SetSelected(splitIDs[0])
+	strategySel := widget.NewSelect([]string{
+		string(simulation.SplitRoundRobin),
+		string(simulation.SplitFillOneSide),
+		string(simulation.SplitPreferAfterCrosswalk),
+	}, nil)
+	strategySel.SetSelected(string(simulation.SplitRoundRobin))
+	d := dialog.NewForm("Split Strategy", "Apply", "Cancel", []*widget.FormItem{
+		widget.NewFormItem("Split Node", nodeSel),
+		widget.NewFormItem("Strategy", strategySel),
+	}, func(ok bool) {
+		if !ok {
+			return
+		}
+		sim.SetSplitStrategy(nodeSel.Selected, simulation.SplitStrategy(strategySel.Selected))
+		refresh()
+	}, w)
+	d.Show()
+}
+
+func showPeopleDialog(w fyne.Window, sim *simulation.Simulation, refresh func()) {
+	name := widget.NewEntry()
+	name.SetText("New Person")
+	drop := widget.NewEntry()
+	drop.SetText("3")
+	variance := widget.NewEntry()
+	variance.SetText("1")
+	walk := widget.NewEntry()
+	walk.SetText("4")
+	vehicleIDs := sim.PendingVehicleIDs()
+	if len(vehicleIDs) == 0 {
+		vehicleIDs = []string{"(none)"}
+	}
+	assignSel := widget.NewSelect(append([]string{"(unassigned)"}, vehicleIDs...), nil)
+	assignSel.SetSelected("(unassigned)")
+	d := dialog.NewForm("People", "Add", "Cancel", []*widget.FormItem{
+		widget.NewFormItem("Name", name),
+		widget.NewFormItem("Drop seconds", drop),
+		widget.NewFormItem("Drop random ±", variance),
+		widget.NewFormItem("Walk seconds", walk),
+		widget.NewFormItem("Assign to vehicle", assignSel),
+	}, func(ok bool) {
+		if !ok {
+			return
+		}
+		dropV, _ := strconv.ParseFloat(drop.Text, 32)
+		varianceV, _ := strconv.ParseFloat(variance.Text, 32)
+		walkV, _ := strconv.ParseFloat(walk.Text, 32)
+		id := sim.AddPerson(&model.Person{
+			Name:                   strings.TrimSpace(name.Text),
+			DropOffSeconds:         float32(dropV),
+			DropOffVarianceSeconds: float32(varianceV),
+			WalkSeconds:            float32(walkV),
+		})
+		if assignSel.Selected != "(unassigned)" && assignSel.Selected != "(none)" {
+			sim.AssignPersonToVehicle(id, assignSel.Selected)
+		}
 		refresh()
 	}, w)
 	d.Show()

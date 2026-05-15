@@ -28,6 +28,8 @@ func nodeColor(t model.NodeType) color.RGBA {
 	switch t {
 	case model.NodeStreet:
 		return color.RGBA{R: 90, G: 90, B: 90, A: 255}
+	case model.NodeQueue:
+		return color.RGBA{R: 120, G: 120, B: 20, A: 255}
 	case model.NodeIdentifier:
 		return color.RGBA{R: 210, G: 120, B: 10, A: 255}
 	case model.NodeSplit:
@@ -40,6 +42,10 @@ func nodeColor(t model.NodeType) color.RGBA {
 		return color.RGBA{R: 30, G: 150, B: 50, A: 255}
 	case model.NodeWaitZone:
 		return color.RGBA{R: 180, G: 150, B: 10, A: 255}
+	case model.NodeServiceZone:
+		return color.RGBA{R: 30, G: 160, B: 110, A: 255}
+	case model.NodeBuilding:
+		return color.RGBA{R: 20, G: 110, B: 60, A: 255}
 	case model.NodeExit:
 		return color.RGBA{R: 70, G: 70, B: 70, A: 255}
 	}

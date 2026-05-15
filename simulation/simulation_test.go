@@ -14,14 +14,21 @@ func TestBuildRoute_DropOff(t *testing.T) {
 	if route.Entry == nil || route.Entry.Type != model.NodeStreet {
 		t.Fatal("invalid entry node")
 	}
-	count := 0
+	serviceCount := 0
+	queueCount := 0
 	for _, n := range route.Nodes {
-		if n.Type == model.NodeDropZone {
-			count++
+		if n.Type == model.NodeServiceZone {
+			serviceCount++
+		}
+		if n.Type == model.NodeQueue {
+			queueCount++
 		}
 	}
-	if count < 2 {
-		t.Fatalf("expected >=2 drop zones, got %d", count)
+	if serviceCount < 8 {
+		t.Fatalf("expected >=8 service zones, got %d", serviceCount)
+	}
+	if queueCount == 0 {
+		t.Fatal("expected queue node")
 	}
 }
 
@@ -29,12 +36,12 @@ func TestBuildRoute_PickUp(t *testing.T) {
 	route := simulation.BuildRoute(model.ModePickUp)
 	count := 0
 	for _, n := range route.Nodes {
-		if n.Type == model.NodeWaitZone {
+		if n.Type == model.NodeServiceZone {
 			count++
 		}
 	}
-	if count < 2 {
-		t.Fatalf("expected >=2 wait zones, got %d", count)
+	if count < 8 {
+		t.Fatalf("expected >=8 service zones, got %d", count)
 	}
 }
 
@@ -96,7 +103,7 @@ func TestSimulation_ApplyOverrideAndSuggestions(t *testing.T) {
 	if len(s) == 0 {
 		t.Fatal("expected suggestions for long service vehicle")
 	}
-	if !sim.ApplyOverride(v.ID, "zone-b") {
+	if !sim.ApplyOverride(v.ID, "service-post-a") {
 		t.Fatal("expected override to apply")
 	}
 }
@@ -107,7 +114,7 @@ func TestSimulation_AddAndConnectNode(t *testing.T) {
 	if id == "" {
 		t.Fatal("expected node id")
 	}
-	if !sim.ConnectNodes("zone-a", id, false) {
+	if !sim.ConnectNodes("service-pre-a", id, false) {
 		t.Fatal("expected connection to succeed")
 	}
 	nodes := sim.RouteSnapshot()
@@ -153,5 +160,29 @@ func TestDropOffStyle(t *testing.T) {
 func TestModeString(t *testing.T) {
 	if model.ModeDropOff.String() == model.ModePickUp.String() {
 		t.Fatal("mode strings should differ")
+	}
+}
+
+func TestIDCheckAttachableAndStrategy(t *testing.T) {
+	sim := simulation.NewSimulation(model.ModeDropOff)
+	if !sim.SetNodeIDCheck("queue", true) {
+		t.Fatal("expected queue id-check attach success")
+	}
+	sim.SetSplitStrategy("split-2", simulation.SplitFillOneSide)
+	if sim.GetSplitStrategy("split-2") != simulation.SplitFillOneSide {
+		t.Fatal("split strategy not applied")
+	}
+}
+
+func TestPeoplePoolAssignable(t *testing.T) {
+	sim := simulation.NewSimulation(model.ModeDropOff)
+	v := sim.GenerateVehicle()
+	v.ArrivalMinute = 0
+	v.ArrivalJitterMinute = 0
+	v.LateArrivalExtraMinute = 0
+	sim.Enqueue(v)
+	id := sim.AddPerson(&model.Person{Name: "External Rider", DropOffSeconds: 2, WalkSeconds: 3})
+	if !sim.AssignPersonToVehicle(id, v.ID) {
+		t.Fatal("expected pooled person assignment to vehicle")
 	}
 }
