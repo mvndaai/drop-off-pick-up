@@ -35,4 +35,24 @@ type Vehicle struct {
 	Mode         Mode
 	DropStyle    DropOffStyle
 	Color        color.RGBA
+
+	// PreferredZone is the default preferred zone node ID (e.g. zone-a, zone-b).
+	PreferredZone string
+	// PreferredZoneOverride allows per-vehicle route override.
+	PreferredZoneOverride string
+
+	// ArrivalMinute is the expected arrival minute from simulation start.
+	ArrivalMinute int
+	// ArrivalJitterMinute is an absolute random jitter (+/-) around ArrivalMinute.
+	ArrivalJitterMinute int
+	// LateArrivalExtraMinute models occasional lateness added on top of jitter.
+	LateArrivalExtraMinute int
+}
+
+// EffectivePreferredZone returns the override zone if present, otherwise default.
+func (v *Vehicle) EffectivePreferredZone() string {
+	if v.PreferredZoneOverride != "" {
+		return v.PreferredZoneOverride
+	}
+	return v.PreferredZone
 }

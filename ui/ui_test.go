@@ -15,11 +15,10 @@ func TestMainWindowRenders(t *testing.T) {
 	a := test.NewApp()
 	defer a.Quit()
 	w := ui.NewMainWindow(a)
-	w.Resize(fyne.NewSize(1050, 700))
+	w.Resize(fyne.NewSize(1200, 800))
 	w.Show()
-
 	if w.Content() == nil {
-		t.Error("window must have content")
+		t.Fatal("window has no content")
 	}
 }
 
@@ -29,12 +28,11 @@ func TestRouteViewRenders(t *testing.T) {
 		sim := simulation.NewSimulation(mode)
 		rv := ui.NewRouteView(sim)
 		if rv == nil {
-			t.Errorf("NewRouteView(%v) returned nil", mode)
+			t.Fatalf("nil RouteView for mode %v", mode)
 		}
-		// MinSize must be large enough to display the route.
 		sz := rv.MinSize()
-		if sz.Width < 600 || sz.Height < 500 {
-			t.Errorf("RouteView MinSize too small: %v", sz)
+		if sz.Width < 700 || sz.Height < 600 {
+			t.Fatalf("unexpected min size %v", sz)
 		}
 	}
 }
@@ -43,12 +41,13 @@ func TestRouteViewUpdate(t *testing.T) {
 	test.NewApp()
 	sim := simulation.NewSimulation(model.ModeDropOff)
 	rv := ui.NewRouteView(sim)
+	rv.Update(nil, nil)
+	rv.Update([]simulation.VehicleSnapshot{{LicensePlate: "ABC-123", Pos: model.Point{X: 200, Y: 200}}}, []simulation.PedestrianSnapshot{{Label: "P1", Pos: model.Point{X: 210, Y: 210}}})
+}
 
-	// Update with an empty snapshot – must not panic.
-	rv.Update(nil)
-
-	// Update with a sample snapshot.
-	rv.Update([]simulation.VehicleSnapshot{
-		{LicensePlate: "ABC-123", Pos: model.Point{X: 350, Y: 120}},
-	})
+func TestIconResource(t *testing.T) {
+	res := ui.AppIcon()
+	if res == nil || len(res.Content()) == 0 {
+		t.Fatal("icon resource missing")
+	}
 }

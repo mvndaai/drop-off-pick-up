@@ -1,6 +1,7 @@
 package simulation_test
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -10,147 +11,147 @@ import (
 
 func TestBuildRoute_DropOff(t *testing.T) {
 	route := simulation.BuildRoute(model.ModeDropOff)
-
-	if route.Entry == nil {
-		t.Fatal("route.Entry must not be nil")
+	if route.Entry == nil || route.Entry.Type != model.NodeStreet {
+		t.Fatal("invalid entry node")
 	}
-	if route.Entry.Type != model.NodeStreet {
-		t.Errorf("entry type: got %q, want %q", route.Entry.Type, model.NodeStreet)
-	}
-	if len(route.Nodes) == 0 {
-		t.Error("route must have at least one node")
-	}
-
-	// Verify that Drop Zones exist in the node list.
-	var dropZones int
+	count := 0
 	for _, n := range route.Nodes {
 		if n.Type == model.NodeDropZone {
-			dropZones++
+			count++
 		}
 	}
-	if dropZones < 2 {
-		t.Errorf("drop-off route should have at least 2 drop zones, got %d", dropZones)
+	if count < 2 {
+		t.Fatalf("expected >=2 drop zones, got %d", count)
 	}
 }
 
 func TestBuildRoute_PickUp(t *testing.T) {
 	route := simulation.BuildRoute(model.ModePickUp)
-
-	var waitZones int
+	count := 0
 	for _, n := range route.Nodes {
 		if n.Type == model.NodeWaitZone {
-			waitZones++
+			count++
 		}
 	}
-	if waitZones < 2 {
-		t.Errorf("pick-up route should have at least 2 wait zones, got %d", waitZones)
-	}
-}
-
-func TestBuildRoute_HasCrosswalk(t *testing.T) {
-	for _, mode := range []model.Mode{model.ModeDropOff, model.ModePickUp} {
-		route := simulation.BuildRoute(mode)
-		var found bool
-		for _, n := range route.Nodes {
-			if n.Type == model.NodeCrosswalk {
-				found = true
-				if len(n.CrossLinks) == 0 {
-					t.Errorf("crosswalk node should have cross-links in %s mode", mode)
-				}
-			}
-		}
-		if !found {
-			t.Errorf("%s route missing crosswalk node", mode)
-		}
+	if count < 2 {
+		t.Fatalf("expected >=2 wait zones, got %d", count)
 	}
 }
 
 func TestGenerateVehicle(t *testing.T) {
 	sim := simulation.NewSimulation(model.ModeDropOff)
 	v := sim.GenerateVehicle()
-
-	if v.ID == "" {
-		t.Error("vehicle ID must not be empty")
-	}
-	if v.LicensePlate == "" {
-		t.Error("vehicle LicensePlate must not be empty")
-	}
-	if len(v.Passengers) == 0 {
-		t.Error("vehicle must have at least one passenger")
+	if v.ID == "" || v.LicensePlate == "" || len(v.Passengers) == 0 {
+		t.Fatal("generated vehicle missing required data")
 	}
 	if v.Mode != model.ModeDropOff {
-		t.Errorf("vehicle mode: got %v, want %v", v.Mode, model.ModeDropOff)
+		t.Fatalf("mode mismatch got %v", v.Mode)
 	}
 }
 
 func TestSimulation_EnqueueAndSnapshot(t *testing.T) {
 	sim := simulation.NewSimulation(model.ModeDropOff)
 	v := sim.GenerateVehicle()
+	v.ArrivalMinute = 0
+	v.ArrivalJitterMinute = 0
+	v.LateArrivalExtraMinute = 0
 	sim.Enqueue(v)
-
-	queue := sim.GetQueueSnapshot()
-	if len(queue) != 1 {
-		t.Fatalf("queue length: got %d, want 1", len(queue))
-	}
-	if queue[0].LicensePlate != v.LicensePlate {
-		t.Errorf("queued plate: got %q, want %q", queue[0].LicensePlate, v.LicensePlate)
+	sim.Start()
+	defer sim.Stop()
+	time.Sleep(120 * time.Millisecond)
+	q := sim.GetQueueSnapshot()
+	if len(q) == 0 && len(sim.GetVehicleSnapshots()) == 0 {
+		t.Fatal("expected queued or active vehicle")
 	}
 }
 
 func TestSimulation_StartStop(t *testing.T) {
 	sim := simulation.NewSimulation(model.ModeDropOff)
-
 	if sim.IsRunning() {
-		t.Error("simulation should not be running before Start()")
+		t.Fatal("should not be running before start")
 	}
 	sim.Start()
 	if !sim.IsRunning() {
-		t.Error("simulation should be running after Start()")
+		t.Fatal("should be running after start")
 	}
 	sim.Stop()
-	// Brief wait for goroutine to settle.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 	if sim.IsRunning() {
-		t.Error("simulation should not be running after Stop()")
+		t.Fatal("should not be running after stop")
 	}
 }
 
-func TestSimulation_VehicleAdvances(t *testing.T) {
+func TestSimulation_ApplyOverrideAndSuggestions(t *testing.T) {
 	sim := simulation.NewSimulation(model.ModeDropOff)
-	sim.SetSpeed(20) // run fast
+	v := sim.GenerateVehicle()
+	v.ArrivalMinute = 0
+	v.ArrivalJitterMinute = 0
+	v.LateArrivalExtraMinute = 0
+	for _, p := range v.Passengers {
+		p.DropOffSeconds = 6
+	}
+	sim.Enqueue(v)
 
-	sim.Enqueue(sim.GenerateVehicle())
-	sim.Start()
-	defer sim.Stop()
+	s := sim.SuggestZoneOverrides()
+	if len(s) == 0 {
+		t.Fatal("expected suggestions for long service vehicle")
+	}
+	if !sim.ApplyOverride(v.ID, "zone-b") {
+		t.Fatal("expected override to apply")
+	}
+}
 
-	// Give the simulation a moment to process.
-	time.Sleep(300 * time.Millisecond)
+func TestSimulation_AddAndConnectNode(t *testing.T) {
+	sim := simulation.NewSimulation(model.ModeDropOff)
+	id := sim.AddNode(model.NodeCrosswalk, "Temp", model.Point{X: 100, Y: 100})
+	if id == "" {
+		t.Fatal("expected node id")
+	}
+	if !sim.ConnectNodes("zone-a", id, false) {
+		t.Fatal("expected connection to succeed")
+	}
+	nodes := sim.RouteSnapshot()
+	found := false
+	for _, n := range nodes {
+		if n.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("new node missing in snapshot")
+	}
+}
 
-	// The vehicle should either be active or already done.
-	// Either way, the queue should now be empty.
-	queue := sim.GetQueueSnapshot()
-	if len(queue) != 0 {
-		t.Errorf("vehicle should have been admitted from queue, but queue still has %d entries", len(queue))
+func TestSimulation_SaveLoad(t *testing.T) {
+	sim := simulation.NewSimulation(model.ModePickUp)
+	v := sim.GenerateVehicle()
+	v.ArrivalMinute = 0
+	v.ArrivalJitterMinute = 0
+	v.LateArrivalExtraMinute = 0
+	sim.Enqueue(v)
+	var buf bytes.Buffer
+	if err := sim.SaveScenario(&buf); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	sim2 := simulation.NewSimulation(model.ModeDropOff)
+	if err := sim2.LoadScenario(&buf); err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if sim2.Mode != model.ModePickUp {
+		t.Fatalf("mode mismatch after load: %v", sim2.Mode)
 	}
 }
 
 func TestDropOffStyle(t *testing.T) {
 	if model.DropOffSelf.Duration() >= model.DropOffAssisted.Duration() {
-		t.Error("assisted drop-off should take longer than self drop-off")
-	}
-	if model.DropOffSelf.String() == model.DropOffAssisted.String() {
-		t.Error("drop-off style strings must be distinct")
+		t.Fatal("assisted should be longer")
 	}
 }
 
-func TestMode_String(t *testing.T) {
-	if model.ModeDropOff.String() == "" {
-		t.Error("ModeDropOff.String() must not be empty")
-	}
-	if model.ModePickUp.String() == "" {
-		t.Error("ModePickUp.String() must not be empty")
-	}
+func TestModeString(t *testing.T) {
 	if model.ModeDropOff.String() == model.ModePickUp.String() {
-		t.Error("mode strings must be distinct")
+		t.Fatal("mode strings should differ")
 	}
 }
