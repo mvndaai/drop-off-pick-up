@@ -118,27 +118,27 @@ type QueueEntry struct {
 
 // SerializableNode stores a route node with edge IDs for save/load.
 type SerializableNode struct {
-	ID         string         `json:"id"`
-	Type       model.NodeType `json:"type"`
-	Label      string         `json:"label"`
-	RequiresIDCheck bool      `json:"requiresIdCheck,omitempty"`
-	X          float32        `json:"x"`
-	Y          float32        `json:"y"`
-	Exits      []string       `json:"exits,omitempty"`
-	CrossLinks []string       `json:"crossLinks,omitempty"`
+	ID              string         `json:"id"`
+	Type            model.NodeType `json:"type"`
+	Label           string         `json:"label"`
+	RequiresIDCheck bool           `json:"requiresIdCheck,omitempty"`
+	X               float32        `json:"x"`
+	Y               float32        `json:"y"`
+	Exits           []string       `json:"exits,omitempty"`
+	CrossLinks      []string       `json:"crossLinks,omitempty"`
 }
 
 // ScenarioFile is the persisted simulation configuration.
 type ScenarioFile struct {
-	Mode            model.Mode         `json:"mode"`
-	Speed           float32            `json:"speed"`
-	DefaultZone     string             `json:"defaultZone"`
-	Devices         []DeviceControl    `json:"devices"`
+	Mode            model.Mode               `json:"mode"`
+	Speed           float32                  `json:"speed"`
+	DefaultZone     string                   `json:"defaultZone"`
+	Devices         []DeviceControl          `json:"devices"`
 	SplitStrategies map[string]SplitStrategy `json:"splitStrategies,omitempty"`
-	Nodes           []SerializableNode `json:"nodes"`
-	QueuedVehicles  []model.Vehicle    `json:"queuedVehicles"`
-	PendingVehicles []model.Vehicle    `json:"pendingVehicles"`
-	People          []model.Person     `json:"people,omitempty"`
+	Nodes           []SerializableNode       `json:"nodes"`
+	QueuedVehicles  []model.Vehicle          `json:"queuedVehicles"`
+	PendingVehicles []model.Vehicle          `json:"pendingVehicles"`
+	People          []model.Person           `json:"people,omitempty"`
 }
 
 // Simulation manages vehicles through the route.
@@ -158,27 +158,27 @@ type Simulation struct {
 	simElapsed   float32
 	nextNodeID   int
 
-	active  []*vehicleProgress
-	queue   []*model.Vehicle
-	pending []*scheduledVehicle
-	devices map[string]DeviceControl
-	splitStrategies map[string]SplitStrategy
-	peopleByID map[string]*model.Person
+	active           []*vehicleProgress
+	queue            []*model.Vehicle
+	pending          []*scheduledVehicle
+	devices          map[string]DeviceControl
+	splitStrategies  map[string]SplitStrategy
+	peopleByID       map[string]*model.Person
 	unassignedPeople []string
-	nextPersonID int
+	nextPersonID     int
 }
 
 // NewSimulation creates a Simulation for the given mode.
 func NewSimulation(mode model.Mode) *Simulation {
 	route := BuildRoute(mode)
 	s := &Simulation{
-		Mode:          mode,
-		Route:         route,
-		Speed:         1,
-		DefaultZoneID: "service-pre-a",
-		devices:       map[string]DeviceControl{},
+		Mode:            mode,
+		Route:           route,
+		Speed:           1,
+		DefaultZoneID:   "service-pre-a",
+		devices:         map[string]DeviceControl{},
 		splitStrategies: map[string]SplitStrategy{},
-		peopleByID:    map[string]*model.Person{},
+		peopleByID:      map[string]*model.Person{},
 	}
 	for _, n := range route.Nodes {
 		if n.Type == model.NodeCrosswalk || n.Type == model.NodeSplit {

@@ -36,14 +36,14 @@ const (
 
 // RouteNode is a single vertex in the route graph.
 type RouteNode struct {
-	ID         string
-	Type       NodeType
-	Label      string
-	Pos        Point
+	ID    string
+	Type  NodeType
+	Label string
+	Pos   Point
 	// RequiresIDCheck makes ID check attachable to any node.
 	RequiresIDCheck bool
-	Exits      []*RouteNode
-	CrossLinks []*RouteNode
+	Exits           []*RouteNode
+	CrossLinks      []*RouteNode
 }
 
 // Route is the complete directed graph of nodes for one operational mode.
