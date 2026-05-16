@@ -98,6 +98,21 @@ type VehicleSnapshot struct {
 	PreferredZone string
 }
 
+// CrossingGuardPhase describes what the stop-sign holder is currently doing.
+type CrossingGuardPhase string
+
+const (
+	GuardEntering CrossingGuardPhase = "entering"
+	GuardHolding  CrossingGuardPhase = "holding"
+	GuardLeaving  CrossingGuardPhase = "leaving"
+)
+
+// CrossingGuardSnapshot is a read-only, UI-safe view of an active crossing guard.
+type CrossingGuardSnapshot struct {
+	Pos   model.Point
+	Phase CrossingGuardPhase
+}
+
 // PedestrianSnapshot represents a simulated pedestrian moving near crosswalk paths.
 type PedestrianSnapshot struct {
 	VehicleID string
@@ -118,14 +133,16 @@ type QueueEntry struct {
 
 // SerializableNode stores a route node with edge IDs for save/load.
 type SerializableNode struct {
-	ID              string         `json:"id"`
-	Type            model.NodeType `json:"type"`
-	Label           string         `json:"label"`
-	RequiresIDCheck bool           `json:"requiresIdCheck,omitempty"`
-	X               float32        `json:"x"`
-	Y               float32        `json:"y"`
-	Exits           []string       `json:"exits,omitempty"`
-	CrossLinks      []string       `json:"crossLinks,omitempty"`
+	ID                        string         `json:"id"`
+	Type                      model.NodeType `json:"type"`
+	Label                     string         `json:"label"`
+	RequiresIDCheck           bool           `json:"requiresIdCheck,omitempty"`
+	HasStopSignHolder         bool           `json:"hasStopSignHolder,omitempty"`
+	StopSignHolderWalkSeconds float32        `json:"stopSignHolderWalkSeconds,omitempty"`
+	X                         float32        `json:"x"`
+	Y                         float32        `json:"y"`
+	Exits                     []string       `json:"exits,omitempty"`
+	CrossLinks                []string       `json:"crossLinks,omitempty"`
 }
 
 // ScenarioFile is the persisted simulation configuration.
@@ -586,6 +603,69 @@ func (s *Simulation) firstPedTarget(n *model.RouteNode) *model.RouteNode {
 	return nil
 }
 
+// GetCrossingGuardSnapshots returns active crossing-guard positions and phases.
+// A guard is active whenever a vehicle is waiting at a crosswalk that has
+// HasStopSignHolder enabled.  The phase sequence is:
+//
+//	entering → the guard walks out to stop traffic
+//	holding  → stop sign is raised; pedestrians cross
+//	leaving  → guard walks back; vehicle may proceed once timer expires
+func (s *Simulation) GetCrossingGuardSnapshots() []CrossingGuardSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []CrossingGuardSnapshot
+	for _, vp := range s.active {
+		if vp.state != StateWaiting {
+			continue
+		}
+		node := vp.currentNode
+		if node.Type != model.NodeCrosswalk || !node.HasStopSignHolder {
+			continue
+		}
+		walkTime := node.StopSignHolderWalkSeconds
+		if walkTime <= 0 {
+			walkTime = 3
+		}
+		crossingTime := float32(1)
+		if !s.canProceed(node) {
+			crossingTime = 2
+		}
+		var phase CrossingGuardPhase
+		switch {
+		case vp.waitTimer > crossingTime+walkTime:
+			phase = GuardEntering
+		case vp.waitTimer > crossingTime:
+			phase = GuardHolding
+		default:
+			phase = GuardLeaving
+		}
+		out = append(out, CrossingGuardSnapshot{
+			Pos:   model.Point{X: node.Pos.X + 22, Y: node.Pos.Y},
+			Phase: phase,
+		})
+	}
+	return out
+}
+
+// SetCrosswalkGuard enables or disables the stop-sign holder on a crosswalk node.
+// walkSeconds is the one-way walk time; pass 0 to keep the existing value.
+// Returns false if the node does not exist or is not a crosswalk.
+func (s *Simulation) SetCrosswalkGuard(nodeID string, enabled bool, walkSeconds float32) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.Route.FindNode(nodeID)
+	if n == nil || n.Type != model.NodeCrosswalk {
+		return false
+	}
+	n.HasStopSignHolder = enabled
+	if walkSeconds > 0 {
+		n.StopSignHolderWalkSeconds = walkSeconds
+	} else if n.StopSignHolderWalkSeconds <= 0 {
+		n.StopSignHolderWalkSeconds = 3
+	}
+	return true
+}
+
 func (s *Simulation) tick(dt float32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -833,14 +913,26 @@ func (s *Simulation) arriveAt(vp *vehicleProgress) {
 		vp.estimatedCost = total
 	case model.NodeCrosswalk:
 		vp.state = StateWaiting
+		baseTime := float32(1)
+		statusMsg := "Crosswalk"
 		if !s.canProceed(node) {
-			vp.waitTimer = 2
-			vp.waitTotal = 2
-			vp.statusMsg = "Crosswalk stop"
+			baseTime = 2
+			statusMsg = "Crosswalk stop"
+		}
+		if node.HasStopSignHolder {
+			walkTime := node.StopSignHolderWalkSeconds
+			if walkTime <= 0 {
+				walkTime = 3
+			}
+			// Guard walks in, pedestrians cross, guard walks back out.
+			total := walkTime + baseTime + walkTime
+			vp.waitTimer = total
+			vp.waitTotal = total
+			vp.statusMsg = statusMsg + " (guard)"
 		} else {
-			vp.waitTimer = 1
-			vp.waitTotal = 1
-			vp.statusMsg = "Crosswalk"
+			vp.waitTimer = baseTime
+			vp.waitTotal = baseTime
+			vp.statusMsg = statusMsg
 		}
 	case model.NodeExit:
 		vp.statusMsg = "Exit"
@@ -935,7 +1027,7 @@ func (s *Simulation) RouteNodes() []model.RouteNode {
 	defer s.mu.Unlock()
 	out := make([]model.RouteNode, len(s.Route.Nodes))
 	for i, n := range s.Route.Nodes {
-		out[i] = model.RouteNode{ID: n.ID, Type: n.Type, Label: n.Label, Pos: n.Pos, RequiresIDCheck: n.RequiresIDCheck}
+		out[i] = model.RouteNode{ID: n.ID, Type: n.Type, Label: n.Label, Pos: n.Pos, RequiresIDCheck: n.RequiresIDCheck, HasStopSignHolder: n.HasStopSignHolder, StopSignHolderWalkSeconds: n.StopSignHolderWalkSeconds}
 	}
 	return out
 }
@@ -947,12 +1039,14 @@ func (s *Simulation) RouteSnapshot() []SerializableNode {
 	out := make([]SerializableNode, 0, len(s.Route.Nodes))
 	for _, n := range s.Route.Nodes {
 		sn := SerializableNode{
-			ID:              n.ID,
-			Type:            n.Type,
-			Label:           n.Label,
-			RequiresIDCheck: n.RequiresIDCheck,
-			X:               n.Pos.X,
-			Y:               n.Pos.Y,
+			ID:                        n.ID,
+			Type:                      n.Type,
+			Label:                     n.Label,
+			RequiresIDCheck:           n.RequiresIDCheck,
+			HasStopSignHolder:         n.HasStopSignHolder,
+			StopSignHolderWalkSeconds: n.StopSignHolderWalkSeconds,
+			X:                         n.Pos.X,
+			Y:                         n.Pos.Y,
 		}
 		for _, e := range n.Exits {
 			sn.Exits = append(sn.Exits, e.ID)
@@ -1045,7 +1139,7 @@ func (s *Simulation) SaveScenario(w io.Writer) error {
 	defer s.mu.Unlock()
 	nodes := make([]SerializableNode, 0, len(s.Route.Nodes))
 	for _, n := range s.Route.Nodes {
-		sn := SerializableNode{ID: n.ID, Type: n.Type, Label: n.Label, RequiresIDCheck: n.RequiresIDCheck, X: n.Pos.X, Y: n.Pos.Y}
+		sn := SerializableNode{ID: n.ID, Type: n.Type, Label: n.Label, RequiresIDCheck: n.RequiresIDCheck, HasStopSignHolder: n.HasStopSignHolder, StopSignHolderWalkSeconds: n.StopSignHolderWalkSeconds, X: n.Pos.X, Y: n.Pos.Y}
 		for _, e := range n.Exits {
 			sn.Exits = append(sn.Exits, e.ID)
 		}
@@ -1096,7 +1190,7 @@ func (s *Simulation) LoadScenario(r io.Reader) error {
 	nodeMap := map[string]*model.RouteNode{}
 	routeNodes := make([]*model.RouteNode, 0, len(payload.Nodes))
 	for _, sn := range payload.Nodes {
-		n := &model.RouteNode{ID: sn.ID, Type: sn.Type, Label: sn.Label, RequiresIDCheck: sn.RequiresIDCheck, Pos: model.Point{X: sn.X, Y: sn.Y}}
+		n := &model.RouteNode{ID: sn.ID, Type: sn.Type, Label: sn.Label, RequiresIDCheck: sn.RequiresIDCheck, HasStopSignHolder: sn.HasStopSignHolder, StopSignHolderWalkSeconds: sn.StopSignHolderWalkSeconds, Pos: model.Point{X: sn.X, Y: sn.Y}}
 		nodeMap[n.ID] = n
 		routeNodes = append(routeNodes, n)
 	}

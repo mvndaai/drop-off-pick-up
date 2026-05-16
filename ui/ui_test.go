@@ -41,8 +41,12 @@ func TestRouteViewUpdate(t *testing.T) {
 	test.NewApp()
 	sim := simulation.NewSimulation(model.ModeDropOff)
 	rv := ui.NewRouteView(sim)
-	rv.Update(nil, nil)
-	rv.Update([]simulation.VehicleSnapshot{{LicensePlate: "ABC-123", Pos: model.Point{X: 200, Y: 200}}}, []simulation.PedestrianSnapshot{{Label: "P1", Pos: model.Point{X: 210, Y: 210}}})
+	rv.Update(nil, nil, nil)
+	rv.Update(
+		[]simulation.VehicleSnapshot{{LicensePlate: "ABC-123", Pos: model.Point{X: 200, Y: 200}}},
+		[]simulation.PedestrianSnapshot{{Label: "P1", Pos: model.Point{X: 210, Y: 210}}},
+		[]simulation.CrossingGuardSnapshot{{Pos: model.Point{X: 220, Y: 220}, Phase: simulation.GuardHolding}},
+	)
 }
 
 func TestIconResource(t *testing.T) {

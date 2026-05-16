@@ -48,8 +48,9 @@ func buildModeTab(w fyne.Window, sim *simulation.Simulation, title string) fyne.
 	refreshAll := func() {
 		snaps := sim.GetVehicleSnapshots()
 		peds := sim.GetPedestrianSnapshots()
+		guards := sim.GetCrossingGuardSnapshots()
 		suggestions := sim.SuggestZoneOverrides()
-		routeView.Update(snaps, peds)
+		routeView.Update(snaps, peds, guards)
 		refreshStatus(snaps, sim.GetQueueSnapshot(), suggestions, sim.GetDeviceControls(), sim.SimulationMinute())
 	}
 	sim.OnUpdate = refreshAll
@@ -165,6 +166,9 @@ func buildModeTab(w fyne.Window, sim *simulation.Simulation, title string) fyne.
 	idCheckBtn := widget.NewButton("Attach ID Check", func() {
 		showAttachIDCheckDialog(w, sim, refreshAll)
 	})
+	crosswalkGuardBtn := widget.NewButton("Crosswalk Guard", func() {
+		showCrosswalkGuardDialog(w, sim, refreshAll)
+	})
 	splitStrategyBtn := widget.NewButton("Split Strategy", func() {
 		showSplitStrategyDialog(w, sim, refreshAll)
 	})
@@ -182,7 +186,7 @@ func buildModeTab(w fyne.Window, sim *simulation.Simulation, title string) fyne.
 	desc.Wrapping = fyne.TextWrapWord
 
 	row1 := container.NewHBox(addVehicleBtn, setupVehicleBtn, peopleBtn, startBtn, stopBtn, widget.NewLabel("Mode"), modeSel, widget.NewLabel("Speed"), speedSel)
-	row2 := container.NewHBox(addNodeBtn, connectBtn, deviceBtn, idCheckBtn, splitStrategyBtn, suggestBtn, applySuggestBtn, saveBtn, loadBtn)
+	row2 := container.NewHBox(addNodeBtn, connectBtn, deviceBtn, idCheckBtn, crosswalkGuardBtn, splitStrategyBtn, suggestBtn, applySuggestBtn, saveBtn, loadBtn)
 	controls := container.NewVBox(desc, row1, row2)
 
 	return container.NewBorder(controls, nil, nil, statusPanel, routeView)
@@ -462,6 +466,42 @@ func showDeviceDialog(w fyne.Window, sim *simulation.Simulation, refresh func())
 			return
 		}
 		sim.SetDeviceControl(nodeSel.Selected, autoCheck.Checked, goCheck.Checked)
+		refresh()
+	}, w)
+	d.Show()
+}
+
+// showCrosswalkGuardDialog lets users attach or remove an optional stop-sign holder
+// on any crosswalk node.  The guard walks out before pedestrians cross and walks
+// back before traffic resumes, adding 2 × walk-time to the crosswalk delay.
+func showCrosswalkGuardDialog(w fyne.Window, sim *simulation.Simulation, refresh func()) {
+	nodes := sim.RouteNodes()
+	crosswalkIDs := make([]string, 0)
+	for _, n := range nodes {
+		if n.Type == model.NodeCrosswalk {
+			crosswalkIDs = append(crosswalkIDs, n.ID)
+		}
+	}
+	if len(crosswalkIDs) == 0 {
+		dialog.ShowInformation("Crosswalk Guard", "No crosswalk nodes available.", w)
+		return
+	}
+	nodeSel := widget.NewSelect(crosswalkIDs, nil)
+	nodeSel.SetSelected(crosswalkIDs[0])
+	enableCheck := widget.NewCheck("Enable stop-sign holder", nil)
+	walkEntry := widget.NewEntry()
+	walkEntry.SetText("3")
+
+	d := dialog.NewForm("Crosswalk Guard", "Apply", "Cancel", []*widget.FormItem{
+		widget.NewFormItem("Crosswalk", nodeSel),
+		widget.NewFormItem("Guard", enableCheck),
+		widget.NewFormItem("Walk time (sec each way)", walkEntry),
+	}, func(ok bool) {
+		if !ok {
+			return
+		}
+		walkV, _ := strconv.ParseFloat(walkEntry.Text, 32)
+		sim.SetCrosswalkGuard(nodeSel.Selected, enableCheck.Checked, float32(walkV))
 		refresh()
 	}, w)
 	d.Show()

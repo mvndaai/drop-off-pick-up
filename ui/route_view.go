@@ -14,14 +14,15 @@ import (
 )
 
 const (
-	canvasW = float32(760)
-	canvasH = float32(660)
-	nodeW   = float32(110)
-	nodeH   = float32(32)
-	vehW    = float32(24)
-	vehH    = float32(16)
-	maxVehs = 50
-	maxPeds = 120
+	canvasW   = float32(760)
+	canvasH   = float32(660)
+	nodeW     = float32(110)
+	nodeH     = float32(32)
+	vehW      = float32(24)
+	vehH      = float32(16)
+	maxVehs   = 50
+	maxPeds   = 120
+	maxGuards = 20
 )
 
 func nodeColor(t model.NodeType) color.RGBA {
@@ -62,6 +63,12 @@ type pedSprite struct {
 	label *canvas.Text
 }
 
+type guardSprite struct {
+	body  *canvas.Circle    // the guard figure
+	sign  *canvas.Rectangle // the stop sign
+	label *canvas.Text
+}
+
 // RouteView renders route graph and supports drag/drop node editing.
 type RouteView struct {
 	widget.BaseWidget
@@ -70,10 +77,12 @@ type RouteView struct {
 	mu          sync.Mutex
 	vehicles    []simulation.VehicleSnapshot
 	pedestrians []simulation.PedestrianSnapshot
+	guards      []simulation.CrossingGuardSnapshot
 	dragNodeID  string
 
-	vehSprites [maxVehs]*vehSprite
-	pedSprites [maxPeds]*pedSprite
+	vehSprites   [maxVehs]*vehSprite
+	pedSprites   [maxPeds]*pedSprite
+	guardSprites [maxGuards]*guardSprite
 }
 
 func NewRouteView(sim *simulation.Simulation) *RouteView {
@@ -93,14 +102,25 @@ func NewRouteView(sim *simulation.Simulation) *RouteView {
 		lbl.TextSize = 7
 		rv.pedSprites[i] = &pedSprite{dot: dot, label: lbl}
 	}
+	for i := range rv.guardSprites {
+		body := canvas.NewCircle(color.Transparent)
+		body.StrokeColor = color.White
+		body.StrokeWidth = 1
+		sign := canvas.NewRectangle(color.Transparent)
+		sign.CornerRadius = 2
+		lbl := canvas.NewText("", color.White)
+		lbl.TextSize = 7
+		rv.guardSprites[i] = &guardSprite{body: body, sign: sign, label: lbl}
+	}
 	rv.ExtendBaseWidget(rv)
 	return rv
 }
 
-func (rv *RouteView) Update(veh []simulation.VehicleSnapshot, peds []simulation.PedestrianSnapshot) {
+func (rv *RouteView) Update(veh []simulation.VehicleSnapshot, peds []simulation.PedestrianSnapshot, guards []simulation.CrossingGuardSnapshot) {
 	rv.mu.Lock()
 	rv.vehicles = veh
 	rv.pedestrians = peds
+	rv.guards = guards
 	rv.mu.Unlock()
 	rv.Refresh()
 }
@@ -206,6 +226,7 @@ func (r *routeRenderer) build() {
 	r.view.mu.Lock()
 	vehicles := append([]simulation.VehicleSnapshot(nil), r.view.vehicles...)
 	pedestrians := append([]simulation.PedestrianSnapshot(nil), r.view.pedestrians...)
+	guards := append([]simulation.CrossingGuardSnapshot(nil), r.view.guards...)
 	r.view.mu.Unlock()
 
 	for i, sp := range r.view.vehSprites {
@@ -236,6 +257,33 @@ func (r *routeRenderer) build() {
 			sp.label.Text = ""
 		}
 		objs = append(objs, sp.dot, sp.label)
+	}
+
+	// Crossing guard sprites: body (circle) + stop sign (small rectangle) + label.
+	// Colours signal phase: yellow = entering, red = holding, green = leaving.
+	guardColors := map[simulation.CrossingGuardPhase]color.RGBA{
+		simulation.GuardEntering: {R: 230, G: 200, B: 0, A: 255},
+		simulation.GuardHolding:  {R: 220, G: 40, B: 40, A: 255},
+		simulation.GuardLeaving:  {R: 40, G: 180, B: 40, A: 255},
+	}
+	for i, sp := range r.view.guardSprites {
+		sp.body.Resize(fyne.NewSize(10, 10))
+		sp.sign.Resize(fyne.NewSize(8, 8))
+		if i < len(guards) {
+			g := guards[i]
+			col := guardColors[g.Phase]
+			sp.body.FillColor = col
+			sp.body.Move(fyne.NewPos(g.Pos.X-5, g.Pos.Y-5))
+			sp.sign.FillColor = color.RGBA{R: col.R / 2, G: col.G / 2, B: col.B / 2, A: 255}
+			sp.sign.Move(fyne.NewPos(g.Pos.X+6, g.Pos.Y-10))
+			sp.label.Text = "🚦"
+			sp.label.Move(fyne.NewPos(g.Pos.X-4, g.Pos.Y+6))
+		} else {
+			sp.body.FillColor = color.Transparent
+			sp.sign.FillColor = color.Transparent
+			sp.label.Text = ""
+		}
+		objs = append(objs, sp.body, sp.sign, sp.label)
 	}
 
 	r.objects = objs

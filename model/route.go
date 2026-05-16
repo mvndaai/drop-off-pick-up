@@ -42,8 +42,14 @@ type RouteNode struct {
 	Pos   Point
 	// RequiresIDCheck makes ID check attachable to any node.
 	RequiresIDCheck bool
-	Exits           []*RouteNode
-	CrossLinks      []*RouteNode
+	// HasStopSignHolder enables a crossing guard who steps out to stop
+	// vehicles while pedestrians cross, then steps back before traffic resumes.
+	HasStopSignHolder bool
+	// StopSignHolderWalkSeconds is the time for the guard to walk in or out
+	// (the total added delay is 2× this value, framing the pedestrian crossing).
+	StopSignHolderWalkSeconds float32
+	Exits                     []*RouteNode
+	CrossLinks                []*RouteNode
 }
 
 // Route is the complete directed graph of nodes for one operational mode.
