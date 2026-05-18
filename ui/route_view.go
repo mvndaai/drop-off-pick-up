@@ -14,15 +14,18 @@ import (
 )
 
 const (
-	canvasW   = float32(760)
-	canvasH   = float32(660)
-	nodeW     = float32(110)
-	nodeH     = float32(32)
-	vehW      = float32(24)
-	vehH      = float32(16)
-	maxVehs   = 50
-	maxPeds   = 120
-	maxGuards = 20
+	canvasW          = float32(760)
+	canvasH          = float32(660)
+	vehW             = float32(24)
+	vehH             = float32(16)
+	maxVehs          = 50
+	maxPeds          = 120
+	maxGuards        = 20
+	defaultNodeW     = float32(110)
+	defaultNodeH     = float32(32)
+	roadOuterStroke  = float32(24)
+	roadInnerStroke  = float32(18)
+	roadCenterStroke = float32(2)
 )
 
 func nodeColor(t model.NodeType) color.RGBA {
@@ -51,6 +54,147 @@ func nodeColor(t model.NodeType) color.RGBA {
 		return color.RGBA{R: 70, G: 70, B: 70, A: 255}
 	}
 	return color.RGBA{R: 120, G: 120, B: 120, A: 255}
+}
+
+type routeNodeStyle struct {
+	size         fyne.Size
+	cornerRadius float32
+	fill         color.RGBA
+	stroke       color.RGBA
+	label        color.Color
+	diamond      bool
+	crosswalk    bool
+}
+
+func styleForNodeType(t model.NodeType) routeNodeStyle {
+	style := routeNodeStyle{
+		size:         fyne.NewSize(defaultNodeW, defaultNodeH),
+		cornerRadius: 8,
+		fill:         nodeColor(t),
+		stroke:       color.RGBA{R: 220, G: 220, B: 220, A: 220},
+		label:        color.White,
+	}
+	switch t {
+	case model.NodeStreet:
+		style.size = fyne.NewSize(64, 124)
+		style.cornerRadius = 14
+	case model.NodeQueue:
+		style.size = fyne.NewSize(92, 58)
+		style.cornerRadius = 10
+	case model.NodeIdentifier:
+		style.size = fyne.NewSize(108, 42)
+	case model.NodeSplit, model.NodeJoiner:
+		style.size = fyne.NewSize(58, 58)
+		style.diamond = true
+	case model.NodeCrosswalk:
+		style.size = fyne.NewSize(132, 34)
+		style.cornerRadius = 4
+		style.crosswalk = true
+		style.label = color.Black
+	case model.NodeDropZone, model.NodeWaitZone, model.NodeServiceZone:
+		style.size = fyne.NewSize(120, 44)
+	case model.NodeBuilding:
+		style.size = fyne.NewSize(132, 70)
+		style.cornerRadius = 12
+	case model.NodeExit:
+		style.size = fyne.NewSize(74, 42)
+	}
+	return style
+}
+
+func styleForSerializableNode(node simulation.SerializableNode) routeNodeStyle {
+	return styleForNodeType(node.Type)
+}
+
+func centerText(text string, textColor color.Color, textSize float32, center fyne.Position) *canvas.Text {
+	lbl := canvas.NewText(text, textColor)
+	lbl.TextSize = textSize
+	lbl.Alignment = fyne.TextAlignCenter
+	size := lbl.MinSize()
+	lbl.Move(fyne.NewPos(center.X-size.Width/2, center.Y-size.Height/2))
+	return lbl
+}
+
+func nodeAnchor(from, to simulation.SerializableNode) fyne.Position {
+	style := styleForSerializableNode(from)
+	halfW := float64(style.size.Width / 2)
+	halfH := float64(style.size.Height / 2)
+	dx := float64(to.X - from.X)
+	dy := float64(to.Y - from.Y)
+	if dx == 0 && dy == 0 {
+		return fyne.NewPos(from.X, from.Y)
+	}
+	if style.diamond {
+		scale := 1 / ((math.Abs(dx) / halfW) + (math.Abs(dy) / halfH))
+		return fyne.NewPos(from.X+float32(dx*scale), from.Y+float32(dy*scale))
+	}
+	scale := 1 / math.Max(math.Abs(dx)/halfW, math.Abs(dy)/halfH)
+	return fyne.NewPos(from.X+float32(dx*scale), from.Y+float32(dy*scale))
+}
+
+func nodeBounds(nodeType model.NodeType) (float32, float32) {
+	style := styleForNodeType(nodeType)
+	return style.size.Width / 2, style.size.Height / 2
+}
+
+func buildNodeObjects(node simulation.SerializableNode) []fyne.CanvasObject {
+	style := styleForSerializableNode(node)
+	center := fyne.NewPos(node.X, node.Y)
+	topLeft := fyne.NewPos(node.X-style.size.Width/2, node.Y-style.size.Height/2)
+	objs := make([]fyne.CanvasObject, 0, 8)
+
+	switch {
+	case style.diamond:
+		diamond := canvas.NewRasterWithPixels(func(x, y, w, h int) color.Color {
+			if w == 0 || h == 0 {
+				return color.Transparent
+			}
+			cx := float64(w-1) / 2
+			cy := float64(h-1) / 2
+			nx := math.Abs((float64(x) - cx) / cx)
+			ny := math.Abs((float64(y) - cy) / cy)
+			dist := nx + ny
+			switch {
+			case dist <= 0.9:
+				return style.fill
+			case dist <= 1.02:
+				return style.stroke
+			default:
+				return color.Transparent
+			}
+		})
+		diamond.Resize(style.size)
+		diamond.Move(topLeft)
+		objs = append(objs, diamond)
+	case style.crosswalk:
+		base := canvas.NewRectangle(color.RGBA{R: 63, G: 63, B: 63, A: 255})
+		base.StrokeColor = style.stroke
+		base.StrokeWidth = 2
+		base.CornerRadius = style.cornerRadius
+		base.Resize(style.size)
+		base.Move(topLeft)
+		objs = append(objs, base)
+		stripeCount := 5
+		stripeW := style.size.Width / float32(stripeCount*2)
+		for i := 0; i < stripeCount; i++ {
+			stripe := canvas.NewRectangle(color.RGBA{R: 240, G: 240, B: 240, A: 255})
+			stripe.Resize(fyne.NewSize(stripeW, style.size.Height-10))
+			stripe.Move(fyne.NewPos(topLeft.X+8+float32(i)*stripeW*2, topLeft.Y+5))
+			objs = append(objs, stripe)
+		}
+	default:
+		rect := canvas.NewRectangle(style.fill)
+		rect.StrokeColor = style.stroke
+		rect.StrokeWidth = 2
+		rect.CornerRadius = style.cornerRadius
+		rect.Resize(style.size)
+		rect.Move(topLeft)
+		objs = append(objs, rect)
+	}
+
+	lbl := centerText(node.Label, style.label, 10, center)
+	objs = append(objs, lbl)
+	return objs
 }
 
 type vehSprite struct {
@@ -132,19 +276,27 @@ func (rv *RouteView) Dragged(ev *fyne.DragEvent) {
 	if rv.dragNodeID == "" {
 		return
 	}
+	halfW := defaultNodeW / 2
+	halfH := defaultNodeH / 2
+	for _, n := range rv.sim.RouteNodes() {
+		if n.ID == rv.dragNodeID {
+			halfW, halfH = nodeBounds(n.Type)
+			break
+		}
+	}
 	rx := ev.Position.X
 	ry := ev.Position.Y
-	if rx < nodeW/2 {
-		rx = nodeW / 2
+	if rx < halfW {
+		rx = halfW
 	}
-	if ry < nodeH/2 {
-		ry = nodeH / 2
+	if ry < halfH {
+		ry = halfH
 	}
-	if rx > canvasW-nodeW/2 {
-		rx = canvasW - nodeW/2
+	if rx > canvasW-halfW {
+		rx = canvasW - halfW
 	}
-	if ry > canvasH-nodeH/2 {
-		ry = canvasH - nodeH/2
+	if ry > canvasH-halfH {
+		ry = canvasH - halfH
 	}
 	rv.sim.MoveNode(rv.dragNodeID, model.Point{X: rx, Y: ry})
 	rv.Refresh()
@@ -157,7 +309,8 @@ func (rv *RouteView) DragEnd() {
 func (rv *RouteView) hitTestNode(pos fyne.Position) string {
 	nodes := rv.sim.RouteNodes()
 	for _, n := range nodes {
-		if math.Abs(float64(pos.X-n.Pos.X)) <= float64(nodeW/2) && math.Abs(float64(pos.Y-n.Pos.Y)) <= float64(nodeH/2) {
+		halfW, halfH := nodeBounds(n.Type)
+		if math.Abs(float64(pos.X-n.Pos.X)) <= float64(halfW) && math.Abs(float64(pos.Y-n.Pos.Y)) <= float64(halfH) {
 			return n.ID
 		}
 	}
@@ -182,7 +335,9 @@ func (r *routeRenderer) build() {
 		nodeMap[n.ID] = n
 	}
 
-	objs := []fyne.CanvasObject{}
+	background := canvas.NewRectangle(color.RGBA{R: 42, G: 97, B: 52, A: 255})
+	background.Resize(fyne.NewSize(canvasW, canvasH))
+	objs := []fyne.CanvasObject{background}
 
 	for _, node := range route {
 		for _, exitID := range node.Exits {
@@ -190,37 +345,39 @@ func (r *routeRenderer) build() {
 			if !ok {
 				continue
 			}
-			line := canvas.NewLine(color.RGBA{R: 70, G: 70, B: 70, A: 255})
-			line.StrokeWidth = 5
-			line.Position1 = fyne.NewPos(node.X, node.Y)
-			line.Position2 = fyne.NewPos(exit.X, exit.Y)
-			objs = append(objs, line)
+			start := nodeAnchor(node, exit)
+			end := nodeAnchor(exit, node)
+			outer := canvas.NewLine(color.RGBA{R: 45, G: 47, B: 50, A: 255})
+			outer.StrokeWidth = roadOuterStroke
+			outer.Position1 = start
+			outer.Position2 = end
+			inner := canvas.NewLine(color.RGBA{R: 76, G: 79, B: 83, A: 255})
+			inner.StrokeWidth = roadInnerStroke
+			inner.Position1 = start
+			inner.Position2 = end
+			centerLine := canvas.NewLine(color.RGBA{R: 242, G: 210, B: 90, A: 220})
+			centerLine.StrokeWidth = roadCenterStroke
+			centerLine.Position1 = start
+			centerLine.Position2 = end
+			objs = append(objs, outer, inner, centerLine)
 		}
 		for _, crossID := range node.CrossLinks {
 			exit, ok := nodeMap[crossID]
 			if !ok {
 				continue
 			}
-			line := canvas.NewLine(color.RGBA{R: 160, G: 90, B: 210, A: 160})
-			line.StrokeWidth = 2
-			line.Position1 = fyne.NewPos(node.X, node.Y)
-			line.Position2 = fyne.NewPos(exit.X, exit.Y)
-			objs = append(objs, line)
+			start := nodeAnchor(node, exit)
+			end := nodeAnchor(exit, node)
+			path := canvas.NewLine(color.RGBA{R: 226, G: 226, B: 226, A: 180})
+			path.StrokeWidth = 4
+			path.Position1 = start
+			path.Position2 = end
+			objs = append(objs, path)
 		}
 	}
 
 	for _, node := range route {
-		rect := canvas.NewRectangle(nodeColor(node.Type))
-		rect.CornerRadius = 5
-		rect.Resize(fyne.NewSize(nodeW, nodeH))
-		rect.Move(fyne.NewPos(node.X-nodeW/2, node.Y-nodeH/2))
-		objs = append(objs, rect)
-
-		lbl := canvas.NewText(node.Label, color.White)
-		lbl.TextSize = 11
-		lbl.Alignment = fyne.TextAlignCenter
-		lbl.Move(fyne.NewPos(node.X-nodeW/2, node.Y-nodeH/2+6))
-		objs = append(objs, lbl)
+		objs = append(objs, buildNodeObjects(node)...)
 	}
 
 	r.view.mu.Lock()
