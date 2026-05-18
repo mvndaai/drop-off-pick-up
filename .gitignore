@@ -35,5 +35,7 @@ go.work.sum
 drop-off-pick-up
 
 # Editor/IDE
-# .idea/
+.idea/
 # .vscode/
+
+wasm

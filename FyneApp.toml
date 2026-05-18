@@ -1,0 +1,6 @@
+[Details]
+Icon = "ui/icon.png"
+Name = "Drop-Off Pick-Up"
+ID = "io.github.mvndaai.dropoffpickup"
+Version = "1.0.0"
+Build = 3
