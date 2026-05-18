@@ -27,6 +27,15 @@ go.work.sum
 # env file
 .env
 
+# Fyne web build output (produced by `fyne package -os web`)
+/web/
+
+# Fyne desktop build outputs
+*.app
+drop-off-pick-up
+
 # Editor/IDE
-# .idea/
+.idea/
 # .vscode/
+
+wasm
